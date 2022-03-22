@@ -9,15 +9,11 @@ import {
   getPackageInfo,
   IdentifierOption,
   addFileScope,
-  stringifyFileScope,
-  parseFileScope,
 } from '@vanilla-extract/integration';
 import { PostCSSConfigResult, resolvePostcssConfig } from './postcss';
 
 const styleUpdateEvent = (fileId: string) =>
   `vanilla-extract-style-update:${fileId}`;
-
-const virtualPrefix = 'virtual:vanilla-extract:';
 
 interface Options {
   identifiers?: IdentifierOption;
@@ -28,8 +24,6 @@ export function vanillaExtractPlugin({ identifiers }: Options = {}): Plugin {
   let server: ViteDevServer;
   let postCssConfig: PostCSSConfigResult | null;
   const cssMap = new Map<string, string>();
-
-  let virtualExt: string;
 
   return {
     name: 'vanilla-extract',
@@ -59,45 +53,33 @@ export function vanillaExtractPlugin({ identifiers }: Options = {}): Plugin {
         postCssConfig = await resolvePostcssConfig(config);
       }
 
-      virtualExt = `.vanilla.${config.command === 'serve' ? 'js' : 'css'}`;
-
       packageInfo = getPackageInfo(config.root);
     },
     resolveId(id) {
-      if (id.indexOf(virtualPrefix) === 0) {
+      if (cssMap.has(id)) {
         return id;
       }
     },
     load(id) {
-      if (id.indexOf(virtualPrefix) === 0) {
-        const fileScopeId = id.slice(
-          virtualPrefix.length,
-          id.indexOf(virtualExt),
-        );
+      if (cssMap.has(id)) {
 
-        if (!cssMap.has(fileScopeId)) {
-          throw new Error(`Unable to locate ${fileScopeId} in the CSS map.`);
-        }
-
-        const css = cssMap.get(fileScopeId)!;
+        const css = cssMap.get(id)!;
 
         if (!server) {
           return css;
         }
 
-        const fileScope = parseFileScope(fileScopeId);
-
         return outdent`
           import { injectStyles } from '@vanilla-extract/css/injectStyles';
           
           const inject = (css) => injectStyles({
-            fileScope: ${JSON.stringify(fileScope)},
+            fileScope: ${JSON.stringify({filePath: id})},
             css
           });
 
           inject(${JSON.stringify(css)});
 
-          import.meta.hot.on('${styleUpdateEvent(fileScopeId)}', (css) => {
+          import.meta.hot.on('${styleUpdateEvent(id)}', (css) => {
             inject(css);
           });   
         `;
@@ -142,18 +124,13 @@ export function vanillaExtractPlugin({ identifiers }: Options = {}): Plugin {
         }
       }
 
-      return processVanillaFile({
+      const processed = await processVanillaFile({
         source,
         filePath: validId,
         identOption:
           identifiers ?? (config.mode === 'production' ? 'short' : 'debug'),
-        serializeVirtualCssPath: async ({ fileScope, source }) => {
-          // This file id is requested through a URL where ".." isn't valid.
-          const fileId = stringifyFileScope(fileScope).replace(
-            /\.\./g,
-            '_dir_up_',
-          );
-          const id = `${virtualPrefix}${fileId}${virtualExt}`;
+        serializeVirtualCssPath: async ({ source }) => {
+          const cssFileId = id.replace(/\.ts$/, '');
 
           let cssSource = source;
 
@@ -169,7 +146,7 @@ export function vanillaExtractPlugin({ identifiers }: Options = {}): Plugin {
             cssSource = postCssResult.css;
           }
 
-          if (server && cssMap.has(fileId) && cssMap.get(fileId) !== source) {
+          if (server && cssMap.has(cssFileId) && cssMap.get(cssFileId) !== source) {
             const { moduleGraph } = server;
             const module = moduleGraph.getModuleById(id);
 
@@ -179,16 +156,19 @@ export function vanillaExtractPlugin({ identifiers }: Options = {}): Plugin {
 
             server.ws.send({
               type: 'custom',
-              event: styleUpdateEvent(fileId),
+              event: styleUpdateEvent(cssFileId),
               data: cssSource,
             });
           }
 
-          cssMap.set(fileId, cssSource);
+          
+          cssMap.set(cssFileId, cssSource);
 
-          return `import "${id}";`;
+          return `import "${cssFileId}";`;
         },
       });
+      console.log(processed);
+      return processed;
     },
   };
 }
